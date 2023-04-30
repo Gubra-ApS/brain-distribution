@@ -148,12 +148,76 @@ def region_wise_quantification(signal, atlas_anno, region_ids):
     return labeled_comprehension(signal, atlas_anno, region_ids, np.sum, float, 0)
 
 
+class Elastix:
+    def __init__(self, moving, fixed, elastix_path, result_path):
+        self.moving = moving
+        self.fixed = fixed
+        self.elastix_path = elastix_path
+        self.result_path = result_path
+
+    def registration(self, params, result_name, init_trans=r'', f_mask=r'', save_nifti=True, datatype='uint16', origin_vol=False):
+        program = r'elastix -threads 16 '; #elastix is added to PATH
+        fixed_name = r'-f ' + self.fixed + r' ';
+        moving_name = r'-m ' + self.moving + r' ';
+        outdir = r'-out ' + self.elastix_path + r'/workingDir ';
+        params = r'-p ' + self.elastix_path + r'/' + params + r' ';
+
+        try:
+            if f_mask!=r'':
+                fmask =  r'-fMask ' + f_mask
+                if init_trans != r'':
+                    t0 = r'-t0 ' + os.path.join(self.result_path,init_trans + r'.txt ')
+                    os.system(program + fixed_name + moving_name  + outdir + params + t0 + fmask)
+                else:
+                    os.system(program + fixed_name + moving_name  + outdir + params + fmask)
+                    print(program + fixed_name + moving_name  + outdir + params + fmask)
+            else:
+                if init_trans != r'':
+                    t0 = r'-t0 ' + os.path.join(self.result_path,init_trans + r'.txt ')
+                    os.system(program + fixed_name + moving_name  + outdir + params + t0)
+                else:
+                    print(program + fixed_name + moving_name  + outdir + params)
+                    os.system(program + fixed_name + moving_name  + outdir + params)
+
+            move(self.elastix_path + r'/workingDir/TransformParameters.0.txt', os.path.join(self.result_path,result_name + r'.txt'))
+
+            if save_nifti==True:
+                move(self.elastix_path + r'/workingDir/result.0.nii.gz', os.path.join(self.result_path,result_name + r'.nii.gz'))
+
+                ## temp hack as the nifti file from elastix could not be opened in ITK-SNAP
+                temp = sitk.ReadImage(os.path.join(self.result_path,result_name + r'.nii.gz'))
+                temp = sitk.GetArrayFromImage(temp)
+                temp[temp<0] = 0
+                if datatype=='uint16':
+                    temp[temp>65535] = 65535
+                    temp = temp.astype('uint16')
+                elif datatype=='uint8':
+                    temp[temp>255] = 255
+                    temp = temp.astype('uint8')
+
+                final_sitk = sitk.GetImageFromArray(temp)
+                if isinstance(origin_vol, bool)==False:
+                    sitk_origin =sitk.GetImageFromArray(origin_vol)
+                    final_sitk.SetOrigin((round(sitk_origin.GetWidth()/2), round(sitk_origin.GetHeight()/2), -round(sitk_origin.GetDepth()/2)))
+                else:
+                    final_sitk.SetOrigin((round(final_sitk.GetWidth()/2), round(final_sitk.GetHeight()/2), -round(final_sitk.GetDepth()/2)))
+
+                sitk.WriteImage(final_sitk,os.path.join(self.result_path,result_name + r'.nii.gz'))
+
+        finally:
+            # optional clean up code
+            pass
+
+        return True
 
 
 '''
 ### Run unmixing example script
 '''
 if __name__ == '__main__':
+
+    # elastix folder
+    folder_output_elastix = '/elastix_folder' # folder with registration param files etc.
 
     # input files
     input_auto_image = '/input/auto.tif'  # autofluorescence
@@ -164,9 +228,10 @@ if __name__ == '__main__':
 
     # output files
     output_downsampled_auto = '/output/auto_downsampled.nii.gz'
-    output_spec_unmix_mapped = '/output/spec_unmix_mapped.nii.gz'  # FIXME not used yet
-    output_atlas_annotations_mapped = '/output/atlas_annotations_mapped.nii.gz'  # FIXME not used yet
-    output_atlas_template_mapped = '/output/atlas_template_mapped.nii.gz'  # FIXME not used yet
+    output_spec_unmix = '/output/spec_unmix.nii.gz'
+    output_spec_unmix_mapped = '/output/spec_unmix_mapped.nii.gz'
+    output_atlas_annotations_mapped = '/output/atlas_annotations_mapped.nii.gz'
+    output_atlas_template_mapped = '/output/atlas_template_mapped.nii.gz'
     output_annotated_spec_unmix = '/output/spec_unmix_annotated.csv'
 
     # voxel_sizes
@@ -179,35 +244,60 @@ if __name__ == '__main__':
 
     # unmix signal
     spec_unmix = unmix(auto, spec)
+    save_nifti(spec_unmix, output_spec_unmix)
 
     # downsample autofluorescence to atlas resolution for registration and save for Elastix registration
     auto_25 = downsample_volume(auto, voxel_size_sample, voxel_size_atlas)
     save_nifti(auto_25, output_downsampled_auto)
 
+    ## Atlas registration
+    # Parameter files
+    params_affine = 'affine_mouse_atlas_v6.1.txt'
+    params_bspline = 'bspline_mouse_atlas_v6.1.txt'
+
+    # DEFINE OUTPUT FILES: transformation files to be created
+    file_a2s_affine = '_regi_atlas_2_sample_affine'
+    file_a2s_bspline = output_atlas_template_mapped
+
+    file_s2a_affine = '_regi_sample_2_atlas_affine'
+    file_s2a_bspline = output_spec_unmix_mapped
+
+    # Align atlas to sample space
+    file_moving = input_atlas_template
+    file_fixed = output_downsampled_auto
+    hu_a2s = Elastix(file_moving, file_fixed, folder_output_elastix, 'output')
+
+    hu_a2s.registration(params=params_affine, result_name=file_a2s_affine, datatype='uint8')
+    hu_a2s.registration(params=params_bspline, result_name=file_a2s_bspline, init_trans=file_a2s_affine,
+                        datatype='uint8')
+
+    # Transform atlas annotations to sample space
+    path_input = input_atlas_annotations
+    path_output = output_atlas_annotations_mapped
+    hu_a2s.transform_vol(volume=path_input, trans_params=file_a2s_bspline, result_name=path_output, type='ano')
+
+    # Align sample to atlas space
+    file_moving = output_downsampled_auto
+    file_fixed = input_atlas_template
+    hu_s2a = Elastix(file_moving, file_fixed, folder_output_elastix, 'output')
+
+    hu_s2a.registration(params=params_affine, result_name=file_s2a_affine, datatype='uint8')
+    hu_s2a.registration(params=params_bspline, result_name=file_s2a_bspline, init_trans=file_s2a_affine,
+                        datatype='uint8')
+
+    # Transform atlas annotations to sample space
+    path_input = output_spec_unmix
+    path_output = output_spec_unmix_mapped
+    hu_s2a.transform_vol(volume=path_input, trans_params=file_s2a_bspline, result_name=path_output, type='vol')
 
 
-    # TODO: registration here...
-    # TODO: registration here...
-    # TODO: registration here...
-
-    # TODO: transform atlas to sample space
-    # TODO: transform atlas to sample space
-    # TODO: transform atlas to sample space
-
-    # TODO: transform unmixed volume to atlas space
-    # TODO: transform unmixed volume to atlas space
-    # TODO: transform unmixed volume to atlas space
-
-
-
+    ## Quantification
     # load atlas-to-sample transformed atlas annotations and upsample to full sample resolution
     atlas_annotations_mapped = load_nifti(output_atlas_annotations_mapped)
     atlas_annotations_mapped = upsample_volume(atlas_annotations_mapped, spec_unmix.shape, interp_order=0)
 
-    # get annotation template
+    # get annotation template for quantification
     df = pd.read_csv(input_annotation_template, header=None)
     region_ids = df.iloc[:,0].to_numpy()  # get region ID column
     df.iloc[:, 1] = region_wise_quantification(spec_unmix, atlas_annotations_mapped, region_ids)
     df.to_csv(output_annotated_spec_unmix, header=None, index=None)
-
-

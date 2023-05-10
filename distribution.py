@@ -285,7 +285,7 @@ if __name__ == '__main__':
     hu_s2a.registration(params=params_bspline, result_name=file_s2a_bspline, init_trans=file_s2a_affine,
                         datatype='uint8')
 
-    # Transform atlas annotations to sample space
+    # Transform unmix signal to atlas space
     path_input = output_spec_unmix
     path_output = output_spec_unmix_mapped
     hu_s2a.transform_vol(volume=path_input, trans_params=file_s2a_bspline, result_name=path_output, type='vol')
